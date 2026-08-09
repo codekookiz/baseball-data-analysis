@@ -73,12 +73,14 @@ def predict(X, art):
     X_cb = X.copy()
     X_cb[art["cat_cols"]] = X_cb[art["cat_cols"]].astype(int)
     p_cb = art["cb_model"].predict_proba(X_cb)[:, 1]
-    # v7: LGB+XGB+CatBoost 3개를 K-fold OOF로 학습한 로지스틱 메타러너로 결합
-    pred = art["meta_model"].predict_proba(np.column_stack([p_lgb, p_xgb, p_cb]))[:, 1]
+    p_cb6 = art["cb6_model"].predict_proba(X_cb)[:, 1]
+    # v9: LGB+XGB+CatBoost(d8)+CatBoost(d6) 4개를 K-fold OOF로 학습한 로지스틱 메타러너로 결합
+    pred = art["meta_model"].predict_proba(np.column_stack([p_lgb, p_xgb, p_cb, p_cb6]))[:, 1]
 
-    # bias-fix: 학습 시즌 추세로 추정한 기대 성공률로 예측 평균을 맞춤 (train 통계만 사용)
-    shift = art["expected_rate_2025"] - pred.mean()
-    pred = np.clip(pred + shift, 1e-4, 1 - 1e-4)
+    # bias-fix: v11부터 고정 상수(bias_shift)를 그대로 더한다. 이 값은 train_final.py에서
+    # OOF(train 데이터)만으로 학습 시점에 미리 계산해 저장한 상수 — 지금 추론 중인 배치(X)의
+    # 값은 전혀 참조하지 않는다 (평가 데이터 분포로 개별 행을 보정하면 안 된다는 규정 준수).
+    pred = np.clip(pred + art["bias_shift"], 1e-4, 1 - 1e-4)
     return pred
 
 
