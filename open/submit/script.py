@@ -66,21 +66,32 @@ def build_features(df, art):
     return df[art["feats"]]
 
 
-def predict(X, art):
-    p_lgb = art["lgb_model"].predict_proba(X)[:, 1]
-    p_xgb = art["xgb_model"].predict_proba(X)[:, 1]
+def predict_single(X, sub_art):
+    p_lgb = sub_art["lgb_model"].predict_proba(X)[:, 1]
+    p_xgb = sub_art["xgb_model"].predict_proba(X)[:, 1]
     # CatBoost는 cat_features가 int/str만 허용 (ordinal encoder 출력은 float)
     X_cb = X.copy()
-    X_cb[art["cat_cols"]] = X_cb[art["cat_cols"]].astype(int)
-    p_cb = art["cb_model"].predict_proba(X_cb)[:, 1]
-    p_cb6 = art["cb6_model"].predict_proba(X_cb)[:, 1]
+    X_cb[sub_art["cat_cols"]] = X_cb[sub_art["cat_cols"]].astype(int)
+    p_cb = sub_art["cb_model"].predict_proba(X_cb)[:, 1]
+    p_cb6 = sub_art["cb6_model"].predict_proba(X_cb)[:, 1]
     # v9: LGB+XGB+CatBoost(d8)+CatBoost(d6) 4개를 K-fold OOF로 학습한 로지스틱 메타러너로 결합
-    pred = art["meta_model"].predict_proba(np.column_stack([p_lgb, p_xgb, p_cb, p_cb6]))[:, 1]
+    pred = sub_art["meta_model"].predict_proba(np.column_stack([p_lgb, p_xgb, p_cb, p_cb6]))[:, 1]
 
-    # bias-fix: v11부터 고정 상수(bias_shift)를 그대로 더한다. 이 값은 train_final.py에서
-    # OOF(train 데이터)만으로 학습 시점에 미리 계산해 저장한 상수 — 지금 추론 중인 배치(X)의
-    # 값은 전혀 참조하지 않는다 (평가 데이터 분포로 개별 행을 보정하면 안 된다는 규정 준수).
-    pred = np.clip(pred + art["bias_shift"], 1e-4, 1 - 1e-4)
+    # bias-fix: 고정 상수(bias_shift)를 그대로 더한다. 이 값은 train_final.py에서 OOF(train
+    # 데이터)만으로 학습 시점에 미리 계산해 저장한 상수 — 지금 추론 중인 배치(X)의 값은 전혀
+    # 참조하지 않는다 (평가 데이터 분포로 개별 행을 보정하면 안 된다는 규정 준수).
+    pred = pred + sub_art["bias_shift"]
+    return pred
+
+
+def predict(X, art):
+    # v23: 서로 다른 recency sample_weight(decay=1.0/0.9)로 학습된 두 개의 완결된 모델
+    # (v18, v19)을 블렌드. 각각 train 데이터만으로 독립적으로 계산된 bias_shift를 이미
+    # 포함하고 있으므로, 블렌드 이후에도 평가 데이터 자체는 전혀 참조하지 않는다 (규정 준수).
+    sub_preds = [predict_single(X, sub_art) for sub_art in art["sub_models"]]
+    weights = art["blend_weights"]
+    pred = np.average(np.column_stack(sub_preds), axis=1, weights=weights)
+    pred = np.clip(pred, 1e-4, 1 - 1e-4)
     return pred
 
 
