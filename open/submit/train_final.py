@@ -118,7 +118,14 @@ def main():
     # v24: 같은 원리로, v19 레시피(alpha=0.3832, decay=0.9)를 그대로 쓰되 랜덤 시드만 바꿔서
     # (42->52, 123->133) 독립적인 "쌍둥이" 모델을 학습 — v18+v19+v24 3-way 블렌드용 세 번째
     # 다양성 소스. 시드만 다르므로 개별 성능은 v19와 비슷할 것으로 기대(안정적인 저위험 선택).
+    # v32: decay=0.85 시도 -> 881.38로 대붕괴 (meta_coef에 음수 계수 등 학습 단계부터 불안정
+    # 신호 있었음). decay 축은 0.8/0.85/0.9/0.95/1.0 사이에 아무 매끄러운 관계가 없음이
+    # 최종 확인됨 — 이 축은 완전히 마감, 더 이상 건드리지 않음.
+    # v33: decay는 검증된 안전값(0.9, v19와 동일)으로 고정하고, 대신 컬럼 서브샘플링 비율을
+    # 낮춰서(0.8->0.5) 트리 구조 자체의 다양성을 만드는 새 축 시도. LGB_COLSAMPLE 상수로
+    # LGB(feature_fraction)/XGB(colsample_bytree)/CatBoost(rsm) 전부 통일 적용.
     DECAY = 0.9
+    COLSAMPLE = 0.5
     FIXED_N_ITER = None  # 매번 early stopping으로 n_iter를 정상적으로 선택
     max_season_all = train["season"].max()
     train["_sw"] = DECAY ** (max_season_all - train["season"])
@@ -129,40 +136,21 @@ def main():
     sw_full = train["_sw"].values
 
     # ---- LightGBM ----
-    # v27: R41(로컬 4-fold)에서 회귀(L2) objective가 classifier(logloss)에 3/4 fold로 졌지만
-    # 마진이 소수점 5자리(거의 노이즈 수준)라, 실전 재확인 목적으로 LGB만 회귀 objective로
-    # 전환 (XGB/CatBoost/CatBoost6/메타러너/alpha/decay는 v19와 완전히 동일 유지 — 순수하게
-    # "objective 변경"이라는 단일 변수만 분리해서 실전 검증).
-    LGB_REGRESSION_OBJECTIVE = True
     if FIXED_N_ITER:
         n_iter_lgb = FIXED_N_ITER["lgb"]
         print(f"LightGBM: n_iter 고정 사용 (n_iter_lgb={n_iter_lgb}), early stopping 생략")
     else:
         print("LightGBM: early stopping pass ...")
-        if LGB_REGRESSION_OBJECTIVE:
-            lgbm_es = lgb.LGBMRegressor(objective="regression", n_estimators=3000, learning_rate=0.05,
-                                         num_leaves=31, max_depth=8, min_child_samples=20, reg_lambda=1.0,
-                                         bagging_fraction=0.8, bagging_freq=1, feature_fraction=0.8,
-                                         random_state=42, n_jobs=-1, verbosity=-1)
-            lgbm_es.fit(X_fit, y_fit, sample_weight=sw_fit, eval_set=[(X_es, y_es)], eval_metric="l2",
-                        callbacks=[lgb.early_stopping(50, verbose=False)])
-        else:
-            lgbm_es = lgb.LGBMClassifier(n_estimators=3000, learning_rate=0.05, num_leaves=31, max_depth=8,
-                                          min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
-                                          feature_fraction=0.8, random_state=42, n_jobs=-1, verbosity=-1)
-            lgbm_es.fit(X_fit, y_fit, sample_weight=sw_fit, eval_set=[(X_es, y_es)],
-                        callbacks=[lgb.early_stopping(50, verbose=False)])
+        lgbm_es = lgb.LGBMClassifier(n_estimators=3000, learning_rate=0.05, num_leaves=31, max_depth=8,
+                                      min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
+                                      feature_fraction=COLSAMPLE, random_state=42, n_jobs=-1, verbosity=-1)
+        lgbm_es.fit(X_fit, y_fit, sample_weight=sw_fit, eval_set=[(X_es, y_es)],
+                    callbacks=[lgb.early_stopping(50, verbose=False)])
         n_iter_lgb = lgbm_es.best_iteration_
         print(f" n_iter_lgb={n_iter_lgb}, refit on full data ...")
-    if LGB_REGRESSION_OBJECTIVE:
-        lgb_model = lgb.LGBMRegressor(objective="regression", n_estimators=n_iter_lgb, learning_rate=0.05,
-                                       num_leaves=31, max_depth=8, min_child_samples=20, reg_lambda=1.0,
-                                       bagging_fraction=0.8, bagging_freq=1, feature_fraction=0.8,
-                                       random_state=42, n_jobs=-1, verbosity=-1)
-    else:
-        lgb_model = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=31, max_depth=8,
-                                        min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
-                                        feature_fraction=0.8, random_state=42, n_jobs=-1, verbosity=-1)
+    lgb_model = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=31, max_depth=8,
+                                    min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
+                                    feature_fraction=COLSAMPLE, random_state=42, n_jobs=-1, verbosity=-1)
     lgb_model.fit(X_full, y_full, sample_weight=sw_full)
 
     # ---- XGBoost ----
@@ -173,7 +161,7 @@ def main():
         print("XGBoost: early stopping pass ...")
         xgb_es = xgb.XGBClassifier(n_estimators=3000, learning_rate=0.05, max_depth=5, max_leaves=31,
                                     grow_policy="lossguide", min_child_weight=20, reg_lambda=1.0,
-                                    subsample=0.8, colsample_bytree=0.8,
+                                    subsample=0.8, colsample_bytree=COLSAMPLE,
                                     tree_method="hist", random_state=42, n_jobs=-1,
                                     eval_metric="logloss", early_stopping_rounds=50)
         xgb_es.fit(X_fit, y_fit, sample_weight=sw_fit, eval_set=[(X_es, y_es)], verbose=False)
@@ -181,7 +169,7 @@ def main():
         print(f" n_iter_xgb={n_iter_xgb}, refit on full data ...")
     xgb_model = xgb.XGBClassifier(n_estimators=n_iter_xgb, learning_rate=0.05, max_depth=5, max_leaves=31,
                                    grow_policy="lossguide", min_child_weight=20, reg_lambda=1.0,
-                                   subsample=0.8, colsample_bytree=0.8,
+                                   subsample=0.8, colsample_bytree=COLSAMPLE,
                                    tree_method="hist", random_state=42, n_jobs=-1)
     xgb_model.fit(X_full, y_full, sample_weight=sw_full)
 
@@ -195,13 +183,13 @@ def main():
         print(f"CatBoost: n_iter 고정 사용 (n_iter_cb={n_iter_cb}), early stopping 생략")
     else:
         print("CatBoost: early stopping pass ...")
-        cb_es = CatBoostClassifier(iterations=2000, learning_rate=0.05, depth=8, l2_leaf_reg=3.0,
+        cb_es = CatBoostClassifier(iterations=2000, learning_rate=0.05, depth=8, l2_leaf_reg=3.0, rsm=COLSAMPLE,
                                     cat_features=cat_idx, random_seed=42, verbose=False,
                                     early_stopping_rounds=50, thread_count=4)
         cb_es.fit(X_fit_cb, y_fit, sample_weight=sw_fit, eval_set=(X_es_cb, y_es))
         n_iter_cb = cb_es.get_best_iteration()
         print(f" n_iter_cb={n_iter_cb}, refit on full data ...")
-    cb_model = CatBoostClassifier(iterations=n_iter_cb, learning_rate=0.05, depth=8, l2_leaf_reg=3.0,
+    cb_model = CatBoostClassifier(iterations=n_iter_cb, learning_rate=0.05, depth=8, l2_leaf_reg=3.0, rsm=COLSAMPLE,
                                    cat_features=cat_idx, random_seed=42, verbose=False, thread_count=4)
     cb_model.fit(X_full_cb, y_full, sample_weight=sw_full)
 
@@ -211,13 +199,13 @@ def main():
         print(f"CatBoost(depth=6): n_iter 고정 사용 (n_iter_cb6={n_iter_cb6}), early stopping 생략")
     else:
         print("CatBoost(depth=6): early stopping pass ...")
-        cb6_es = CatBoostClassifier(iterations=2000, learning_rate=0.05, depth=6, l2_leaf_reg=3.0,
+        cb6_es = CatBoostClassifier(iterations=2000, learning_rate=0.05, depth=6, l2_leaf_reg=3.0, rsm=COLSAMPLE,
                                      cat_features=cat_idx, random_seed=123, verbose=False,
                                      early_stopping_rounds=50, thread_count=4)
         cb6_es.fit(X_fit_cb, y_fit, sample_weight=sw_fit, eval_set=(X_es_cb, y_es))
         n_iter_cb6 = cb6_es.get_best_iteration()
         print(f" n_iter_cb6={n_iter_cb6}, refit on full data ...")
-    cb6_model = CatBoostClassifier(iterations=n_iter_cb6, learning_rate=0.05, depth=6, l2_leaf_reg=3.0,
+    cb6_model = CatBoostClassifier(iterations=n_iter_cb6, learning_rate=0.05, depth=6, l2_leaf_reg=3.0, rsm=COLSAMPLE,
                                     cat_features=cat_idx, random_seed=123, verbose=False, thread_count=4)
     cb6_model.fit(X_full_cb, y_full, sample_weight=sw_full)
 
@@ -234,33 +222,25 @@ def main():
     oof_cb6 = np.zeros(len(X_idx))
     for i, (fit_idx, oof_idx) in enumerate(kf.split(X_idx)):
         sw_fold = sw_idx.iloc[fit_idx].values
-        if LGB_REGRESSION_OBJECTIVE:
-            m1 = lgb.LGBMRegressor(objective="regression", n_estimators=n_iter_lgb, learning_rate=0.05,
-                                    num_leaves=31, max_depth=8, min_child_samples=20, reg_lambda=1.0,
-                                    bagging_fraction=0.8, bagging_freq=1, feature_fraction=0.8,
-                                    random_state=42, n_jobs=-1, verbosity=-1)
-            m1.fit(X_idx.iloc[fit_idx], y_idx.iloc[fit_idx], sample_weight=sw_fold)
-            oof_lgb[oof_idx] = np.clip(m1.predict(X_idx.iloc[oof_idx]), 0.0, 1.0)
-        else:
-            m1 = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=31, max_depth=8,
-                                     min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
-                                     feature_fraction=0.8, random_state=42, n_jobs=-1, verbosity=-1)
-            m1.fit(X_idx.iloc[fit_idx], y_idx.iloc[fit_idx], sample_weight=sw_fold)
-            oof_lgb[oof_idx] = m1.predict_proba(X_idx.iloc[oof_idx])[:, 1]
+        m1 = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=31, max_depth=8,
+                                 min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
+                                 feature_fraction=COLSAMPLE, random_state=42, n_jobs=-1, verbosity=-1)
+        m1.fit(X_idx.iloc[fit_idx], y_idx.iloc[fit_idx], sample_weight=sw_fold)
+        oof_lgb[oof_idx] = m1.predict_proba(X_idx.iloc[oof_idx])[:, 1]
 
         m2 = xgb.XGBClassifier(n_estimators=n_iter_xgb, learning_rate=0.05, max_depth=5, max_leaves=31,
                                 grow_policy="lossguide", min_child_weight=20, reg_lambda=1.0,
-                                subsample=0.8, colsample_bytree=0.8,
+                                subsample=0.8, colsample_bytree=COLSAMPLE,
                                 tree_method="hist", random_state=42, n_jobs=-1)
         m2.fit(X_idx.iloc[fit_idx], y_idx.iloc[fit_idx], sample_weight=sw_fold)
         oof_xgb[oof_idx] = m2.predict_proba(X_idx.iloc[oof_idx])[:, 1]
 
-        m3 = CatBoostClassifier(iterations=n_iter_cb, learning_rate=0.05, depth=8, l2_leaf_reg=3.0,
+        m3 = CatBoostClassifier(iterations=n_iter_cb, learning_rate=0.05, depth=8, l2_leaf_reg=3.0, rsm=COLSAMPLE,
                                  cat_features=cat_idx, random_seed=42, verbose=False, thread_count=4)
         m3.fit(X_idx_cb.iloc[fit_idx], y_idx.iloc[fit_idx], sample_weight=sw_fold)
         oof_cb[oof_idx] = m3.predict_proba(X_idx_cb.iloc[oof_idx])[:, 1]
 
-        m4 = CatBoostClassifier(iterations=n_iter_cb6, learning_rate=0.05, depth=6, l2_leaf_reg=3.0,
+        m4 = CatBoostClassifier(iterations=n_iter_cb6, learning_rate=0.05, depth=6, l2_leaf_reg=3.0, rsm=COLSAMPLE,
                                  cat_features=cat_idx, random_seed=123, verbose=False, thread_count=4)
         m4.fit(X_idx_cb.iloc[fit_idx], y_idx.iloc[fit_idx], sample_weight=sw_fold)
         oof_cb6[oof_idx] = m4.predict_proba(X_idx_cb.iloc[oof_idx])[:, 1]
