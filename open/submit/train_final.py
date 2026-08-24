@@ -38,6 +38,18 @@ def add_interactions(df, li_q75):
     df["is_high_leverage"] = (df["li"] >= li_q75).astype(int)
     df["is_close_late"] = ((df["inning"] >= 7) & (df["score_diff_pitcher_team"].abs() <= 1)).astype(int)
     df["same_hand"] = (df["pitcher_hand"] == df["batter_hand"]).astype(int)
+
+    # v35: R49(2021~2024 4-fold LGB 단일모델 proxy)에서 2/4 fold로 애매했지만(2024 fold는
+    # baseline이 근소 우위), 실전 재확인 목적으로 채택. asof_pitcher_ball/strike/middle/
+    # reverse_rate 4개를 개별 값이 아니라 "분포 형태"(엔트로피/표준편차)로 요약 — 투수가
+    # 얼마나 일관적인지를 나타내는, 개별 rate 하나로는 안 잡히는 정보라는 가설.
+    rate_cols = ["asof_pitcher_ball_rate", "asof_pitcher_strike_rate",
+                 "asof_pitcher_middle_rate", "asof_pitcher_reverse_rate"]
+    rates = df[rate_cols]
+    s = rates.sum(axis=1)
+    p = rates.div(s.replace(0, np.nan), axis=0).clip(lower=1e-6)
+    df["pitcher_outcome_entropy"] = -(p * np.log(p)).sum(axis=1)
+    df["pitcher_outcome_std"] = rates.std(axis=1)
     return df
 
 
@@ -122,10 +134,11 @@ def main():
     # 신호 있었음). decay 축은 0.8/0.85/0.9/0.95/1.0 사이에 아무 매끄러운 관계가 없음이
     # 최종 확인됨 — 이 축은 완전히 마감, 더 이상 건드리지 않음.
     # v33: decay는 검증된 안전값(0.9, v19와 동일)으로 고정하고, 대신 컬럼 서브샘플링 비율을
-    # 낮춰서(0.8->0.5) 트리 구조 자체의 다양성을 만드는 새 축 시도. LGB_COLSAMPLE 상수로
-    # LGB(feature_fraction)/XGB(colsample_bytree)/CatBoost(rsm) 전부 통일 적용.
+    # 낮춰서(0.8->0.5) 트리 구조 자체의 다양성을 만드는 새 축 시도 -> 블렌드 시 +0.02 확인.
+    # v35: colsample은 표준값(0.8)으로 복귀 — pitcher_outcome_entropy 피처 추가라는 단일
+    # 변수만 분리해서 v19 레시피 대비 순수하게 검증.
     DECAY = 0.9
-    COLSAMPLE = 0.5
+    COLSAMPLE = 0.8
     FIXED_N_ITER = None  # 매번 early stopping으로 n_iter를 정상적으로 선택
     max_season_all = train["season"].max()
     train["_sw"] = DECAY ** (max_season_all - train["season"])
