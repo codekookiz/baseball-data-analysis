@@ -39,17 +39,13 @@ def add_interactions(df, li_q75):
     df["is_close_late"] = ((df["inning"] >= 7) & (df["score_diff_pitcher_team"].abs() <= 1)).astype(int)
     df["same_hand"] = (df["pitcher_hand"] == df["batter_hand"]).astype(int)
 
-    # v35: R49(2021~2024 4-fold LGB 단일모델 proxy)에서 2/4 fold로 애매했지만(2024 fold는
-    # baseline이 근소 우위), 실전 재확인 목적으로 채택. asof_pitcher_ball/strike/middle/
-    # reverse_rate 4개를 개별 값이 아니라 "분포 형태"(엔트로피/표준편차)로 요약 — 투수가
-    # 얼마나 일관적인지를 나타내는, 개별 rate 하나로는 안 잡히는 정보라는 가설.
-    rate_cols = ["asof_pitcher_ball_rate", "asof_pitcher_strike_rate",
-                 "asof_pitcher_middle_rate", "asof_pitcher_reverse_rate"]
-    rates = df[rate_cols]
-    s = rates.sum(axis=1)
-    p = rates.div(s.replace(0, np.nan), axis=0).clip(lower=1e-6)
-    df["pitcher_outcome_entropy"] = -(p * np.log(p)).sum(axis=1)
-    df["pitcher_outcome_std"] = rates.std(axis=1)
+    # v35(엔트로피/표준편차 피처)는 938.67로 명확히 기각됨 (v19 대비 -14.28) — 제거.
+    # v36: R51(2021~2024 4-fold LGB 단일모델 proxy)에서 2/4 fold로 v35와 동일한 패턴이지만,
+    # 슬롯 소진 원칙에 따라 사용자 판단으로 실전 재확인. prev1(직전 경기) vs prev5(최근 5경기
+    # 평균)의 괴리 — 시즌 전체 asof_rate와 다른 "지금 컨디션이 장기 평균보다 좋은가/나쁜가"
+    # 정보라는 가설.
+    df["pitcher_success_trend"] = df["asof_pitcher_prev1_game_success_rate"] - df["asof_pitcher_prev5_game_success_rate"]
+    df["pitcher_middle_trend"] = df["asof_pitcher_prev1_game_middle_rate"] - df["asof_pitcher_prev5_game_middle_rate"]
     return df
 
 
