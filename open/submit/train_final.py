@@ -39,13 +39,8 @@ def add_interactions(df, li_q75):
     df["is_close_late"] = ((df["inning"] >= 7) & (df["score_diff_pitcher_team"].abs() <= 1)).astype(int)
     df["same_hand"] = (df["pitcher_hand"] == df["batter_hand"]).astype(int)
 
-    # v35(엔트로피/표준편차 피처)는 938.67로 명확히 기각됨 (v19 대비 -14.28) — 제거.
-    # v36: R51(2021~2024 4-fold LGB 단일모델 proxy)에서 2/4 fold로 v35와 동일한 패턴이지만,
-    # 슬롯 소진 원칙에 따라 사용자 판단으로 실전 재확인. prev1(직전 경기) vs prev5(최근 5경기
-    # 평균)의 괴리 — 시즌 전체 asof_rate와 다른 "지금 컨디션이 장기 평균보다 좋은가/나쁜가"
-    # 정보라는 가설.
-    df["pitcher_success_trend"] = df["asof_pitcher_prev1_game_success_rate"] - df["asof_pitcher_prev5_game_success_rate"]
-    df["pitcher_middle_trend"] = df["asof_pitcher_prev1_game_middle_rate"] - df["asof_pitcher_prev5_game_middle_rate"]
+    # v35(엔트로피/표준편차)와 v36(prev1-vs-prev5 트렌드) 둘 다 명확히 기각됨(-14.28, -20.85)
+    # — 손수 파생 피처 방향은 닫힌 것으로 판단, 원본 v19/v33 피처셋으로 복귀.
     return df
 
 
@@ -133,8 +128,12 @@ def main():
     # 낮춰서(0.8->0.5) 트리 구조 자체의 다양성을 만드는 새 축 시도 -> 블렌드 시 +0.02 확인.
     # v35: colsample은 표준값(0.8)으로 복귀 — pitcher_outcome_entropy 피처 추가라는 단일
     # 변수만 분리해서 v19 레시피 대비 순수하게 검증.
+    # v37: LightGBM만 num_leaves 31->15 (더 얕은 트리 = colsample과는 다른 정규화 축).
+    # R56 로컬 4-fold proxy에서 3/4 승 (2/4 coin-flip 기각선 위) — XGB/CatBoost는 그대로 두고
+    # LGB 한 곳만 바꿔서 실제로 검증된 범위만 반영.
     DECAY = 0.9
     COLSAMPLE = 0.8
+    NUM_LEAVES = 15
     FIXED_N_ITER = None  # 매번 early stopping으로 n_iter를 정상적으로 선택
     max_season_all = train["season"].max()
     train["_sw"] = DECAY ** (max_season_all - train["season"])
@@ -150,14 +149,14 @@ def main():
         print(f"LightGBM: n_iter 고정 사용 (n_iter_lgb={n_iter_lgb}), early stopping 생략")
     else:
         print("LightGBM: early stopping pass ...")
-        lgbm_es = lgb.LGBMClassifier(n_estimators=3000, learning_rate=0.05, num_leaves=31, max_depth=8,
+        lgbm_es = lgb.LGBMClassifier(n_estimators=3000, learning_rate=0.05, num_leaves=NUM_LEAVES, max_depth=8,
                                       min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
                                       feature_fraction=COLSAMPLE, random_state=42, n_jobs=-1, verbosity=-1)
         lgbm_es.fit(X_fit, y_fit, sample_weight=sw_fit, eval_set=[(X_es, y_es)],
                     callbacks=[lgb.early_stopping(50, verbose=False)])
         n_iter_lgb = lgbm_es.best_iteration_
         print(f" n_iter_lgb={n_iter_lgb}, refit on full data ...")
-    lgb_model = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=31, max_depth=8,
+    lgb_model = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=NUM_LEAVES, max_depth=8,
                                     min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
                                     feature_fraction=COLSAMPLE, random_state=42, n_jobs=-1, verbosity=-1)
     lgb_model.fit(X_full, y_full, sample_weight=sw_full)
@@ -231,7 +230,7 @@ def main():
     oof_cb6 = np.zeros(len(X_idx))
     for i, (fit_idx, oof_idx) in enumerate(kf.split(X_idx)):
         sw_fold = sw_idx.iloc[fit_idx].values
-        m1 = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=31, max_depth=8,
+        m1 = lgb.LGBMClassifier(n_estimators=n_iter_lgb, learning_rate=0.05, num_leaves=NUM_LEAVES, max_depth=8,
                                  min_child_samples=20, reg_lambda=1.0, bagging_fraction=0.8, bagging_freq=1,
                                  feature_fraction=COLSAMPLE, random_state=42, n_jobs=-1, verbosity=-1)
         m1.fit(X_idx.iloc[fit_idx], y_idx.iloc[fit_idx], sample_weight=sw_fold)
